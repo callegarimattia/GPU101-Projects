@@ -5,6 +5,16 @@
 #include <stdbool.h>
 #include <sys/time.h>
 
+#define gpuErrChk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+
 double get_time() // function to get the time of day in seconds
 {
     struct timeval tv;
@@ -28,10 +38,10 @@ void read_matrix(int **row_ptr, int **col_ind, float **values, float **matrixDia
     if(fscanf(file, "%d %d %d\n", num_rows, num_cols, num_vals)==EOF)
         printf("Error reading file");
 
-    cudaMallocManaged(&row_ptr_t, (*num_rows + 1) * sizeof(int));
-    cudaMallocManaged(&col_ind_t, *num_vals * sizeof(int));
-    cudaMallocManaged(&values_t, *num_vals * sizeof(float));
-    cudaMallocManaged(&matrixDiagonal_t, *num_rows * sizeof(float));
+    gpuErrChk(cudaMallocManaged(&row_ptr_t, (*num_rows + 1) * sizeof(int)));
+    gpuErrChk(cudaMallocManaged(&col_ind_t, *num_vals * sizeof(int)));
+    gpuErrChk(cudaMallocManaged(&values_t, *num_vals * sizeof(float)));
+    gpuErrChk(cudaMallocManaged(&matrixDiagonal_t, *num_rows * sizeof(float)));
     
     // Collect occurances of each row for determining the indices of row_ptr
     int *row_occurances = (int *)malloc(*num_rows * sizeof(int));
@@ -139,7 +149,7 @@ void symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, c
     }
 }
 
-//__global__ 
+__global__ 
 void parallel_symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *matrixDiagonal){
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     for (size_t i = thread_id; i < num_rows; i++)
@@ -155,7 +165,7 @@ void parallel_symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *
 }
 
 bool isResultValid(float *x_cpu, float *x_gpu, long size){
-    for (size_t i = 0; i < size; i++)
+    for (int i = 0; i < size; i++)
     {
         if (x_cpu[i] != x_gpu[i])
             return false;
@@ -184,17 +194,20 @@ int main(int argc, const char *argv[])
 
     int size = num_rows * sizeof(float);
 
+
+    float *x_gpu;
     float *x = (float *)malloc(size);
+    int num_blocks, threads_per_block;
 
     // Memory for gpu result
-    float *x_fromDevice = cudaMallocManaged(size * sizeof(float));
+    gpuErrChk(cudaMallocManaged(&x_gpu, size * sizeof(float)));
 
     // Generate a random vector
     srand(time(NULL));
     for (int i = 0; i < num_rows; i++)
     {
         x[i] = (rand() % 100) / (rand() % 100 + 1); // the number we use to divide cannot be 0, that's the reason of the +1
-        x_fromDevice[i] = x[i];
+       //x_gpu[i] = x[i];
     }
 
     // Compute in sw
@@ -208,19 +221,19 @@ int main(int argc, const char *argv[])
     end_gpu = get_time();
 
     // Check GPU result against CPU
-    // if(isResultValid(x, x_fromDevice, size)) printf("Il risultato è valido.\n");
-    // else printf("Il risultato non è valido.\n");
+    if(isResultValid(x, x_gpu, size)) printf("Il risultato è valido.\n");
+    else printf("Il risultato non è valido.\n");
     
     // Print time
     printf("SYMGS Time CPU: %.10lf\n", end_cpu - start_cpu);
-    // printf("SYMGS Time GPU: %.10lf\n", end_gpu - start_gpu);
+    printf("SYMGS Time GPU: %.10lf\n", end_gpu - start_gpu);
 
     // Free
-    cudaFree(row_ptr);
-    cudaFree(col_ind);
-    cudaFree(values);
-    cudaFree(matrixDiagonal);
+    gpuErrChk(cudaFree(row_ptr));
+    gpuErrChk(cudaFree(col_ind));
+    gpuErrChk(cudaFree(values));
+    gpuErrChk(cudaFree(matrixDiagonal));
+    gpuErrChk(cudaFree(x_gpu));
     free(x);
-    cudaFree(x_fromDevice);
     return 0;
 }

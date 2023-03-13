@@ -3,3 +3,4 @@ symgs/symgs-test
 spmv/spmv-test 
 smith-waterman/sw-test
 /.vscode
+symgs/symgs-gpu-test 
