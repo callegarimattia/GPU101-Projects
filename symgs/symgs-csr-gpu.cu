@@ -236,4 +236,5 @@ int main(int argc, const char *argv[])
     gpuErrChk(cudaFree(x_gpu));
     free(x);
     return 0;
+    
 }
