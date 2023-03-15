@@ -22,6 +22,7 @@ double get_time() // function to get the time of day in seconds
     return tv.tv_sec + tv.tv_usec * 1e-6;
 }
 
+
 // Reads a sparse matrix and represents it using CSR (Compressed Sparse Row) format
 void read_matrix(int **row_ptr, int **col_ind, float **values, float **matrixDiagonal, const char *filename, int *num_rows, int *num_cols, int *num_vals)
 {
@@ -236,5 +237,5 @@ int main(int argc, const char *argv[])
     gpuErrChk(cudaFree(x_gpu));
     free(x);
     return 0;
-    
+
 }
