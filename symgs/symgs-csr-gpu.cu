@@ -5,14 +5,13 @@
 #include <stdbool.h>
 #include <sys/time.h>
 
+// Macro definition for nvidia error checking
 #define gpuErrChk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-   if (code != cudaSuccess) 
-   {
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true){
+    if (code != cudaSuccess) {
       fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
       if (abort) exit(code);
-   }
+    }
 }
 
 double get_time() // function to get the time of day in seconds
@@ -39,6 +38,7 @@ void read_matrix(int **row_ptr, int **col_ind, float **values, float **matrixDia
     if(fscanf(file, "%d %d %d\n", num_rows, num_cols, num_vals)==EOF)
         printf("Error reading file");
 
+    // Used managed memory (available after )
     gpuErrChk(cudaMallocManaged(&row_ptr_t, (*num_rows + 1) * sizeof(int)));
     gpuErrChk(cudaMallocManaged(&col_ind_t, *num_vals * sizeof(int)));
     gpuErrChk(cudaMallocManaged(&values_t, *num_vals * sizeof(float)));
@@ -198,7 +198,7 @@ int main(int argc, const char *argv[])
 
     float *x_gpu;
     float *x = (float *)malloc(size);
-    int num_blocks, threads_per_block;
+    int num_blocks = 1, threads_per_block = 1;
 
     // Memory for gpu result
     gpuErrChk(cudaMallocManaged(&x_gpu, size * sizeof(float)));
@@ -208,7 +208,7 @@ int main(int argc, const char *argv[])
     for (int i = 0; i < num_rows; i++)
     {
         x[i] = (rand() % 100) / (rand() % 100 + 1); // the number we use to divide cannot be 0, that's the reason of the +1
-       //x_gpu[i] = x[i];
+        x_gpu[i] = x[i];
     }
 
     // Compute in sw
@@ -218,7 +218,8 @@ int main(int argc, const char *argv[])
 
     // Compute in parallel on gpu 
     start_gpu = get_time();
-    //parallel_symgs_csr_sw<<<num_blocks, threads_per_block>>>(row_ptr, col_ind, values, num_rows, x, matrixDiagonal);
+    parallel_symgs_csr_sw<<<num_blocks, threads_per_block>>>(row_ptr, col_ind, values, num_rows, x, matrixDiagonal);
+    cudaDeviceSynchronize(); // Wait until gpu is done computing 
     end_gpu = get_time();
 
     // Check GPU result against CPU
