@@ -1,5 +1,5 @@
 NVCC 	= nvcc
-FLAGS 	= -O3 -G -g
+FLAGS 	= -O3 
 PROG 	= symgs-gpu-test
 
 symgs-gpu-test: symgs-csr-gpu.cu

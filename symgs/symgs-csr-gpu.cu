@@ -4,8 +4,8 @@
 #include <time.h>
 #include <stdbool.h>
 #include <sys/time.h>
-#define NUM_ROWS 51813503
-#define NUM_VALS 103565681
+
+#define CUDA_THREADS 1408
 
 // Macro definition for nvidia error checking
 #define CHECK(call)                                                                       \
@@ -35,6 +35,19 @@ double get_time() // function to get the time of day in seconds
     return tv.tv_sec + tv.tv_usec * 1e-6;
 }
 
+// Gets the accuracy of gpu against cpu
+float get_accuracy(float *x_gpu, float *x, int num_rows){
+    float acc;
+    float err;
+    int num;
+    for(int i = 0; i < num_rows; i++){
+        if((err = fabs(x_gpu[i] - x[i]) ) > 0.1 && err / x[i] > 0.1){
+			num++;
+        }
+    }
+    acc = 100.0 - ((float) num / num_rows) * 100;
+    return acc;
+}
 
 // Reads a sparse matrix and represents it using CSR (Compressed Sparse Row) format
 void read_matrix(int **row_ptr, int **col_ind, float **values, float **matrixDiagonal, const char *filename, int *num_rows, int *num_cols, int *num_vals)
@@ -161,19 +174,95 @@ void symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, c
 }
 
 __global__
-void parallel_symgs(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *matrixDiagonal){
-    // Each row has approximatly 2 values
-    // Each row is stored coalesced
-    // The upper triangle of the matrix can be computed in parallel
-    // The diagonal does not modify x so we can ignore it
+void parallel_symgs_fw(
+                        const int *row_ptr, 
+                        const int *col_ind, 
+                        const float *values, 
+                        const int num_rows, 
+                        float *matrixDiagonal,
+                        float *old_x,
+                        float *new_x,
+                        bool *updated)
+{
+    int row_index = threadIdx.x + blockDim.x * blockIdx.x;
+    if(row_index >= num_rows || updated[row_index]) return;
+
+    float sum = old_x[row_index];
+    int row_start = row_ptr[row_index];
+    int row_stop = row_ptr[row_index + 1];
+    float currDiag = matrixDiagonal[row_index];
+    bool row_ready = true;
+
+    for(int i = row_start; 
+        i < row_stop;   
+        i++)
+    {
+        if(!row_ready) break;                                   // Row isn't ready, abort all row calcs
+        if(col_ind[i] < 0) continue;                            // Out of bound value to be handled
+        if(col_ind[i] >= row_index)                             // If the value is above the main diag, it has no dep
+            sum -= values[i] * old_x[col_ind[i]];
+        else if (updated[col_ind[i]])                           // If dep has already been updated, use it
+            sum -= values[i] * new_x[col_ind[i]];
+        else 
+            row_ready = false;                                  // Otherwise lower the row ready flag
+    }
+    if (row_ready)                                              // If row ready is raised after whole row, row has finished
+    {
+        sum += old_x[row_index] * currDiag;                     // Remove diagonal contribution
+        new_x[row_index] = sum / currDiag;                      // Update x value
+        updated[row_index] = true;                              // Raise the updated value of the row
+    }
+    else updated[num_rows] = false;                             // Otherwise set done to false (new iteration is needed)
+}
+
+__global__
+void parallel_symgs_bw(
+                        const int *row_ptr, 
+                        const int *col_ind, 
+                        const float *values, 
+                        const int num_rows, 
+                        float *matrixDiagonal,
+                        float *old_x,
+                        float *new_x,
+                        bool *updated)
+{
+    int row_index = threadIdx.x + blockDim.x * blockIdx.x;
+    if(row_index >= num_rows || updated[row_index]) return;
+
+    float sum = old_x[row_index];
+    int row_start = row_ptr[row_index];
+    int row_stop = row_ptr[row_index + 1];
+    float currDiag = matrixDiagonal[row_index];
+    bool row_ready = true;
+
+    for(int i = row_start; 
+        i < row_stop;   
+        i++)
+    {
+        if(!row_ready) break;                                   // Row isn't ready, abort all row calcs
+        if(col_ind[i] < 0) continue;                            // Out of bound value to be handled
+        if(col_ind[i] <= row_index)                             // If the value is below the main diag, it has no dep
+            sum -= values[i] * old_x[col_ind[i]];
+        else if (updated[col_ind[i]])                           // If dep has already been updated, use it
+            sum -= values[i] * new_x[col_ind[i]];
+        else 
+            row_ready = false;                                  // Otherwise lower the row ready flag
+    }
+    if (row_ready)                                              // If row ready is raised after whole row, row has finished
+    {
+        sum += old_x[row_index] * currDiag;
+        new_x[row_index] = sum / currDiag;                      // Update x value
+        updated[row_index] = true;                              // Raise the updated value of the row
+    }
+    else updated[num_rows] = false;                             // Otherwise set done to false (new iteration is needed)
 }
 
 int main(int argc, const char *argv[])
 {
 
-    if (argc != 2)
+    if (argc != 3)
     {
-        printf("Usage: ./exec matrix_file");
+        printf("Usage: ./exec matrix_file threads_per_block");
         return 0;
     }
 
@@ -200,7 +289,7 @@ int main(int argc, const char *argv[])
     srand(time(NULL));
     for (int i = 0; i < num_rows; i++)
     {
-        x[i] = (float)(rand() % 100) / (rand() % 100 + 1); // the number we use to divide cannot be 0, that's the reason of the +1
+        x[i] = (float) (rand() % 100) / (float) (rand() % 100 + 1); // the number we use to divide cannot be 0, that's the reason of the +1
         x_gpu[i] = x[i];
     }
 
@@ -211,52 +300,85 @@ int main(int argc, const char *argv[])
 
     // GPU
     int *d_row_ptr, *d_col_ind;
-    float *d_values, *d_matrixDiagonal, *d_x, *d_x_computed;
-    int done = 0;
+    float *d_matrixDiagonal, *d_new_x, *d_old_x, *d_values;
+    bool *d_updated;
+    bool done = false;
     
-    CHECK(cudaMallocManaged(&d_row_ptr, (num_rows + 1) * sizeof(int)));
-    CHECK(cudaMallocManaged(&d_col_ind, num_vals * sizeof(int)));
-    CHECK(cudaMallocManaged(&d_values, num_vals * sizeof(float)));
-    CHECK(cudaMallocManaged(&d_matrixDiagonal, num_rows * sizeof(float)));
-    CHECK(cudaMallocManaged(&d_x, num_rows * sizeof(float)));
-    CHECK(cudaMallocManaged(&d_x_computed, num_vals * sizeof(int)));
+    // Device mem allocation
+    CHECK(cudaMalloc(&d_row_ptr, (num_rows + 1) * sizeof(int)));
+    CHECK(cudaMalloc(&d_col_ind, num_vals * sizeof(int)));
+    CHECK(cudaMalloc(&d_values, num_vals * sizeof(float)));
+    CHECK(cudaMalloc(&d_matrixDiagonal, num_rows * sizeof(float)));
+    CHECK(cudaMalloc(&d_new_x, num_rows * sizeof(float)));
+    CHECK(cudaMalloc(&d_old_x, num_rows * sizeof(float)))
+    CHECK(cudaMalloc(&d_updated, num_rows * sizeof(bool) + 1));
 
+    // Array init for the updated flag
+    // Last pos of array is a flag that gets lowered by the device
+    // when the sweep has not been completed and needs to be reiterated
+    CHECK(cudaMemset(d_updated, 0, num_rows * sizeof(bool) + 1));
 
-    CHECK(cudaMemcpy(d_row_ptr, row_ptr, (num_rows + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(d_col_ind, col_ind, num_vals * sizeof(int), cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(d_values, values, num_vals * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(d_matrixDiagonal, matrixDiagonal, num_rows * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(d_x, x_gpu, num_rows * sizeof(float), cudaMemcpyHostToDevice));
+    // Matrix data copy from host memory to device memory
+    CHECK(cudaMemcpy(d_row_ptr, row_ptr, (num_rows + 1) * sizeof(int), cudaMemcpyDefault));
+    CHECK(cudaMemcpy(d_col_ind, col_ind, num_vals * sizeof(int), cudaMemcpyDefault));
+    CHECK(cudaMemcpy(d_values, values, num_vals * sizeof(float), cudaMemcpyDefault));
+    CHECK(cudaMemcpy(d_matrixDiagonal, matrixDiagonal, num_rows * sizeof(float), cudaMemcpyDefault));
+    CHECK(cudaMemcpy(d_old_x, x_gpu, num_rows * sizeof(float), cudaMemcpyDefault));
 
-    int threads_per_block = 1;
-    int rows_per_thread = 1;
-    int num_blocks = num_rows / (threads_per_block * rows_per_thread) + 1;
+    int threads_per_block = atoi(argv[2]);
+    int num_blocks = num_rows / threads_per_block;
+
+    dim3 dimGrid(num_blocks, 1, 1);
+    dim3 dimBlock(threads_per_block, 1, 1);
 
     start_gpu = get_time();
-    parallel_symgs<<<threads_per_block, num_blocks>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_matrixDiagonal);
-    //CHECK_KERNELCALL();
-    CHECK(cudaDeviceSynchronize());
+    
+    while(!done){
+        CHECK(cudaMemset(d_updated + num_rows, 1, sizeof(bool)));
+        parallel_symgs_fw<<<dimGrid, dimBlock>>>(
+            d_row_ptr, 
+            d_col_ind, 
+            d_values, 
+            num_rows,
+            d_matrixDiagonal,
+            d_old_x, 
+            d_new_x,
+            d_updated);
+        CHECK(cudaDeviceSynchronize());
+        CHECK_KERNELCALL();
+        CHECK(cudaMemcpy(&done, d_updated + num_rows, sizeof(bool), cudaMemcpyDefault));
+    }
+
+    done = false;
+    CHECK(cudaMemset(d_updated, 0, num_rows * sizeof(bool) + 1));
+
+    while(!done){
+        CHECK(cudaMemset(d_updated + num_rows, 1, sizeof(bool)));
+        parallel_symgs_bw<<<dimGrid, dimBlock>>>(
+            d_row_ptr, 
+            d_col_ind, 
+            d_values, 
+            num_rows,
+            d_matrixDiagonal,
+            d_old_x, 
+            d_new_x,
+            d_updated);
+        CHECK(cudaDeviceSynchronize());
+        CHECK_KERNELCALL();
+        CHECK(cudaMemcpy(&done, d_updated + num_rows, sizeof(bool), cudaMemcpyDefault));
+    }
+    
     end_gpu = get_time();
 
-    CHECK(cudaMemcpy(x_gpu, d_x, num_rows * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(x_gpu, d_new_x, num_rows * sizeof(float), cudaMemcpyDefault));
 
-    //Accuracy check
-    float acc;
-    int num;
-    for(int i = 0; i < num_rows; i++){
-        if(x_gpu[i] - x[i] > 0.001 || x_gpu[i] - x[i] < -0.001){
-			num++;
-        }
-    }
-    acc = ((float)num / num_rows) * 100;
-    
     end_total = get_time();
 
     // Print timings
     printf("SYMGS Time INPUT: %.10lf\n", end_input - start_input);
     printf("SYMGS Time CPU: %.10lf\n", end_cpu - start_cpu);
     printf("SYMGS Time GPU: %.10lf\n", end_gpu - start_gpu);
-    printf("%d errors on %d righe (delta > 10^-3).\nAccuracy: %.3f%%\n", num, num_rows, 100.0 - acc);
+    printf("Accuracy: %.3f%%\n", get_accuracy(x_gpu, x, num_rows));
     printf("Total execution time: %.10lf\n", end_total - start_total);
 
     // Free
@@ -272,8 +394,9 @@ int main(int argc, const char *argv[])
     CHECK(cudaFree(d_col_ind));
     CHECK(cudaFree(d_matrixDiagonal));
     CHECK(cudaFree(d_values));
-    CHECK(cudaFree(d_x));
+    CHECK(cudaFree(d_new_x));
+    CHECK(cudaFree(d_old_x));
+    CHECK(cudaFree(d_updated));
 
     return 0;
-
 }
