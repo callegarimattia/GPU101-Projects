@@ -1,8 +1,4 @@
 *.mtx
-symgs/symgs-test 
-spmv/spmv-test 
-smith-waterman/sw-test
+symgs/symgs-test
 /.vscode
-symgs/symgs-gpu-test
-sections/
-target/
+symgs/symgs-gpu-test 
