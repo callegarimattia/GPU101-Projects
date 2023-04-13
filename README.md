@@ -22,6 +22,4 @@ Execute using
 ```
 The matrix stored in the .mtx file MUST have non-zero values on the main diagonal. (The matrix used for the testing can be downloaded [here](https://www.dropbox.com/s/jzn573j0z9ffl7h/kmer_V4a.mtx?dl=0))
 
-The threads_per_block value has to be an integer (between 32 and 1024) and it's used for testing performance. Using either 128 or 256 threads per block was found to achieve the best performance on my system (Nvidia GTX 1660 SUPER).
-
-
+The threads_per_block value has to be an integer (between 32 and 1024) and it's used for testing performance. Using 128 threads per block was found to achieve the best performance on my system (Nvidia GTX 1660 SUPER).
