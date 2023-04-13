@@ -1,4 +1,5 @@
 *.mtx
 symgs/symgs-test
 /.vscode
-symgs/symgs-gpu-test 
+symgs/symgs-gpu-test
+.DS_Store
